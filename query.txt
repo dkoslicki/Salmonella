@@ -1,0 +1,6 @@
+/scratch/dmk333_new/temp/Salmonella/Salmonella/target_genomes/ABLENI010000000.fasta.sig
+/scratch/dmk333_new/temp/Salmonella/Salmonella/target_genomes/ABLENN010000000.fasta.sig
+/scratch/dmk333_new/temp/Salmonella/Salmonella/target_genomes/ABLEUL010000000.fasta.sig
+/scratch/dmk333_new/temp/Salmonella/Salmonella/target_genomes/ABLMGG010000000.fasta.sig
+/scratch/dmk333_new/temp/Salmonella/Salmonella/target_genomes/ABMVWC000000000.fasta.sig
+/scratch/dmk333_new/temp/Salmonella/Salmonella/target_genomes/ABMVWH010000000.fasta.sig

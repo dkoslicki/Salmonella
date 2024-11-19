@@ -37,36 +37,59 @@ query_df = pd.read_csv(query_file, header=None, names=['query'])
 target_df = pd.read_csv(target_file, header=None, names=['target'])
 
 # Collect the source files and ksize for the query and target files
+print('parsing query sig files')
 query_df[['source_file', 'ksize']] = query_df['query'].apply(
     lambda x: pd.Series(parse_sig_file(x))
 )
-target_df[['source_file', 'ksize']] = target_df['target'].apply(
-    lambda x: pd.Series(parse_sig_file(x))
-)
+#print('parsing target sig files')
+#target_df[['source_file', 'ksize']] = target_df['target'].apply(
+#    lambda x: pd.Series(parse_sig_file(x))
+#)
+print('parsing target sig files')
+parsed_target_files = [parse_sig_file(x) for x in target_df['target']]
+# Unpack the results into separate lists
+source_files, ksize_values = zip(*parsed_target_files)
+
+# Update the target_df in one go
+target_df['source_file'] = source_files
+target_df['ksize'] = ksize_values
 
 # Collect the first line of the source files
+print('getting first line of query files')
 query_df['first_line'] = query_df['source_file'].apply(get_first_line)
+print('getting first line of target files')
 target_df['first_line'] = target_df['source_file'].apply(get_first_line)
 
-# Read the comparison file
-comparison_df = pd.read_csv(comparison_file)
+# Read the comparison file, name the columns: query, target, containment(A,B), containment(B,A)
+# also, don't treat the first column as the index: that's supposed to be the `query_index`
+print('loading comparisons')
+comparison_df = pd.read_csv(comparison_file, header=None, names=['query_index', 'target_index', 'jaccard',
+                                                                 'containment(A,B)',
+                                                                'containment(B,A)'])
 
 # Use the ksize from the first query file (assuming consistent ksize across files)
 ksize = query_df['ksize'].iloc[0]
 
 # Add the ANI value to the comparison data frame
+print('computing ANIs')
 comparison_df['ANI'] = comparison_df.apply(
     lambda row: max(row['containment(A,B)'], row['containment(B,A)'])**(1/ksize), axis=1
 )
 
-# Create the output data frame
-output_df = pd.DataFrame({
-    'query': query_df['query'],
-    'target': target_df['target'],
-    'query_first_line': query_df['first_line'],
-    'target_first_line': target_df['first_line'],
-    'ANI': comparison_df['ANI']
-})
-
-# Output the data frame to a CSV file
-output_df.to_csv(output_file, index=False)
+# Create the output
+row_num = 0
+with open(output_file, 'w') as f:
+    f.write("query,target,query_first_line,target_first_line,ANI\n")
+    for index, row in comparison_df.iterrows():
+        if row_num % 1000 == 0:
+            print(f"Processing row {row_num}")
+        query_index = int(row['query_index'])
+        target_index = int(row['target_index'])
+        query = query_df['query'].iloc[query_index]
+        target = target_df['target'].iloc[target_index]
+        query_first_line = query_df['first_line'].iloc[query_index]
+        target_first_line = target_df['first_line'].iloc[target_index]
+        ANI = row['ANI']
+        f.write(f"{query},{target},{query_first_line},{target_first_line},{ANI}\n")
+        row_num += 1
+print(f"Output written to {output_file}")
