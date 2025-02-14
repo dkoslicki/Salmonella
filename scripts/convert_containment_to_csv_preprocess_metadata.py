@@ -20,11 +20,6 @@ comparison_file = args.comparison
 output_file = args.output
 target_metadata_file = args.target_metadata
 
-query_file = 'query.txt'
-target_file = 'target.txt'
-comparison_file = 'small_output.txt'
-output_file = 'converted_small_output.csv'
-target_metadata_file = 'target_metadata.csv'
 
 # Helper function to parse the query sig file using jq via subprocess
 def parse_sig_file_jq(sig_file):
