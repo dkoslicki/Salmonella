@@ -9,3 +9,18 @@ and checkout commit 653a247f10b036435f43636858a97ad1f7237687
 
 Rember compilation of C++ code
 and location of directories
+
+
+## Workflow
+
+### Training/reference data
+```bash
+./download.sh  # downloads the Salmonella genomes
+./generate_manifest.sh  # Creates a manifest (list of file names etc.) in prep for `sourmash manysketch` 
+./make_sketches.sh  # Uses `sourmash manysketch` to sketch all the Salmonella genomes
+./split_to_uncompressed.sh # 
+./extract_target_metadata.sh
+./calculate_ani.sh
+python convert_containment_to_csv_preprocess_metadata.py
+
+```

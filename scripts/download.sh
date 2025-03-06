@@ -1,6 +1,8 @@
 #!/bin/bash
 set -eo
 
+echo "Before running, go to https://www.ncbi.nlm.nih.gov/pathogens/isolates/#taxgroup_name:%22Salmonella%20enterica%22 the accessions in a text file in data/input directory. Split this into a few different batches (I did 3 of about ~200K last time)."
+
 # Define a function to process each accession
 process_accession() {
     accession="$1"
