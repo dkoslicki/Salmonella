@@ -18,8 +18,8 @@ and location of directories
 ./download.sh  # downloads the Salmonella genomes
 ./generate_manifest.sh  # Creates a manifest (list of file names etc.) in prep for `sourmash manysketch` 
 ./make_sketches.sh  # Uses `sourmash manysketch` to sketch all the Salmonella genomes
-./split_to_uncompressed.sh # 
-./extract_target_metadata.sh
+./split_to_uncompressed.sh # Takes the single zip file of sketches and turns it into a bunch of individual, uncompressed signatures
+./extract_target_metadata.sh 
 ./calculate_ani.sh
 python convert_containment_to_csv_preprocess_metadata.py
 

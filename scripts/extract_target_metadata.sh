@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Default values
-INPUT_FILE="target.txt"
-OUTPUT_FILE="target_metadata.txt"
+INPUT_FILE="sig_files.txt"
+OUTPUT_FILE="sig_files_metadata.txt"
 
 # Parse command-line arguments
 while [[ "$#" -gt 0 ]]; do
