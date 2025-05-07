@@ -1,365 +1,150 @@
-#!/bin/bash
-# NCBI Genome Downloader
-# A script to download and process genome sequences from NCBI
+#!/usr/bin/env bash
+# ===========================================================
+# NCBI Genome Downloader – v2 (datasets-style)
+# ===========================================================
+# Downloads batches of genomes using the official NCBI Datasets
+# CLI.  Each batch file is given wholesale to `datasets`, which
+# returns one ZIP archive; the script then unpacks only the
+# *.fna files to the desired output directory.
+#
+#  Tested with Datasets CLI 15.34.0  (May 2025)
+# ===========================================================
 
-set -eo pipefail
+set -euo pipefail
 
-# Default values
+# ------------- defaults -----------------------------------------------------
 DEFAULT_INPUT_DIR="./data/input"
 DEFAULT_OUTPUT_DIR="./data/genomes"
-DEFAULT_PARALLEL_JOBS=10
-DEFAULT_BATCH_WAIT=43200  # 12 hours in seconds
+DEFAULT_BATCH_WAIT=43200          # 12 h
 DEFAULT_BATCH_PREFIX="batch_"
+DEFAULT_KEY_FILE="$HOME/NCBI/API_key.txt"
 
-# Function to display usage information
-show_help() {
-    cat << EOF
-NCBI Genome Downloader
-
+# ------------- helper: usage ------------------------------------------------
+usage() {
+    cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
-This script downloads genome sequences from NCBI using accession numbers
-provided in batch files.
-
-Before running:
-  1. Go to: https://www.ncbi.nlm.nih.gov/pathogens/isolates/#taxgroup_name:%22Salmonella%20enterica%22
-  2. Extract accessions from the 'Assembly' column:
-     cat isolates.tsv | cut -f 15 | grep -v '^$' | tail -n +2 > all_accessions.txt
-  3. Split into batch files:
-     split -l 1000 all_accessions.txt batch_
-  4. Place batch files in the input directory
-
-Options:
-  -i, --input-dir DIR      Directory containing batch files with accessions
-                           Default: $DEFAULT_INPUT_DIR
-  -o, --output-dir DIR     Directory to store downloaded genome files
-                           Default: $DEFAULT_OUTPUT_DIR
-  -k, --api-key KEY        NCBI API key (preferred over API key file)
-  -f, --key-file FILE      Path to file containing NCBI API key
-                           Default: ~/NCBI/API_key.txt
-  -j, --jobs NUM           Number of parallel download jobs
-                           Default: $DEFAULT_PARALLEL_JOBS
-  -w, --wait SECONDS       Wait time between batch processing in seconds
-                           Default: $DEFAULT_BATCH_WAIT (12 hours)
-  -p, --prefix PREFIX      Prefix for batch files to process
-                           Default: $DEFAULT_BATCH_PREFIX
-                           Examples: "batch_", "accessions_", "batch.txt"
-  -h, --help               Display this help message and exit
-
-Examples:
-  $(basename "$0") --input-dir ./my_batches --output-dir ./my_genomes --api-key abc123 --jobs 5
-  $(basename "$0") --prefix accessions_ --input-dir ./custom_input
-  $(basename "$0") --prefix batch.txt   # Process a single batch file named batch.txt
-
+Options
+  -i, --input-dir DIR      Directory with batch files      (default $DEFAULT_INPUT_DIR)
+  -o, --output-dir DIR     Directory for *.fna genomes     (default $DEFAULT_OUTPUT_DIR)
+  -k, --api-key KEY        NCBI API key (overrides key-file)
+  -f, --key-file FILE      File containing an API key      (default $DEFAULT_KEY_FILE)
+  -w, --wait SEC           Seconds to wait between batches (default $DEFAULT_BATCH_WAIT)
+  -p, --prefix PFX|FILE    Batch file prefix OR single filename (default $DEFAULT_BATCH_PREFIX)
+  -h, --help               Show this help and exit
 EOF
 }
 
-# Function to check for required dependencies
-check_dependencies() {
-    local missing_deps=()
+# ------------- dependencies -------------------------------------------------
+need() { command -v "$1" >/dev/null || { echo "Missing dependency: $1" >&2; exit 1; }; }
+check_deps() { need datasets; need unzip; }
 
-    # Check for GNU parallel
-    if ! command -v parallel &> /dev/null; then
-        missing_deps+=("GNU parallel")
-    fi
+# ------------- argument parsing --------------------------------------------
+INPUT_DIR=$DEFAULT_INPUT_DIR
+OUTPUT_DIR=$DEFAULT_OUTPUT_DIR
+API_KEY=""
+KEY_FILE=$DEFAULT_KEY_FILE
+BATCH_WAIT=$DEFAULT_BATCH_WAIT
+PREFIX=$DEFAULT_BATCH_PREFIX
 
-    # Check for NCBI datasets tool
-    if ! command -v datasets &> /dev/null; then
-        missing_deps+=("NCBI datasets command line tool")
-    fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -i|--input-dir)  INPUT_DIR=$2; shift 2;;
+        -o|--output-dir) OUTPUT_DIR=$2; shift 2;;
+        -k|--api-key)    API_KEY=$2; shift 2;;
+        -f|--key-file)   KEY_FILE=$2; shift 2;;
+        -w|--wait)       BATCH_WAIT=$2; shift 2;;
+        -p|--prefix)     PREFIX=$2; shift 2;;
+        -h|--help)       usage; exit 0;;
+        *) echo "Unknown option $1" >&2; usage; exit 1;;
+    esac
+done
 
-    # Check for unzip
-    if ! command -v unzip &> /dev/null; then
-        missing_deps+=("unzip")
-    fi
+[[ -d $INPUT_DIR ]]  || { echo "Input dir $INPUT_DIR not found"; exit 1; }
+mkdir -p "$OUTPUT_DIR"
 
-    # Check for flock (used for progress tracking)
-    if ! command -v flock &> /dev/null; then
-        missing_deps+=("flock")
-    fi
-
-    # If any dependencies are missing, display error and exit
-    if [ ${#missing_deps[@]} -gt 0 ]; then
-        echo "Error: Missing required dependencies:" >&2
-        for dep in "${missing_deps[@]}"; do
-            echo "  - $dep" >&2
-        done
-
-        # Provide installation instructions
-        echo -e "\nInstallation instructions:" >&2
-        echo "  - GNU parallel: sudo apt-get install parallel" >&2
-        echo "  - NCBI datasets: https://www.ncbi.nlm.nih.gov/datasets/docs/v2/download-and-install/" >&2
-        echo "  - unzip: sudo apt-get install unzip" >&2
-        echo "  - flock: sudo apt-get install util-linux" >&2
-
-        exit 1
-    fi
-}
-
-# Function to process a single accession
-process_accession() {
-    local accession="$1"
-    local output_dir="$2"
-    local api_key="$3"
-
-    # Skip empty lines and commented out lines
-    if [[ -z "$accession" || "$accession" =~ ^[[:space:]]*# ]]; then
-        return 0
-    fi
-
-    # Strip any whitespace
-    accession=$(echo "$accession" | tr -d '[:space:]')
-
-    # Create a temporary directory
-    local temp_dir=$(mktemp -d)
-
-    # Download the genome accession zip file
-    if datasets --api-key "$api_key" download genome accession --filename "$temp_dir/$accession.zip" "$accession" > /dev/null 2>&1; then
-        # Extract the .fna file from the zip to the output directory
-        if unzip -j "$temp_dir/$accession.zip" "ncbi_dataset/data/$accession/*.fna" -d "$output_dir" > /dev/null 2>&1; then
-            # Success - but don't print anything to avoid cluttering output with parallel jobs
-            :
-        else
-            echo -e "\nWarning: Failed to extract .fna file for $accession" >&2
-        fi
+# API key handling -----------------------------------------------------------
+if [[ -z $API_KEY ]]; then
+    if [[ -f $KEY_FILE ]]; then
+        API_KEY=$(<"$KEY_FILE")
     else
-        echo -e "\nError: Failed to download $accession" >&2
-    fi
-
-    # Clean up
-    rm -rf "$temp_dir"
-}
-
-# Function to ensure directory exists
-ensure_directory() {
-    local dir="$1"
-    if [ ! -d "$dir" ]; then
-        mkdir -p "$dir"
-        echo "Created directory: $dir"
-    fi
-}
-
-# Parse command line arguments
-parse_arguments() {
-    input_dir="$DEFAULT_INPUT_DIR"
-    output_dir="$DEFAULT_OUTPUT_DIR"
-    api_key=""
-    key_file="$HOME/NCBI/API_key.txt"
-    parallel_jobs="$DEFAULT_PARALLEL_JOBS"
-    batch_wait="$DEFAULT_BATCH_WAIT"
-    batch_prefix="$DEFAULT_BATCH_PREFIX"
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -h|--help)
-                show_help
-                exit 0
-                ;;
-            -i|--input-dir)
-                input_dir="$2"
-                shift 2
-                ;;
-            -o|--output-dir)
-                output_dir="$2"
-                shift 2
-                ;;
-            -k|--api-key)
-                api_key="$2"
-                shift 2
-                ;;
-            -f|--key-file)
-                key_file="$2"
-                shift 2
-                ;;
-            -j|--jobs)
-                parallel_jobs="$2"
-                shift 2
-                ;;
-            -w|--wait)
-                batch_wait="$2"
-                shift 2
-                ;;
-            -p|--prefix)
-                batch_prefix="$2"
-                shift 2
-                ;;
-            *)
-                echo "Error: Unknown option: $1" >&2
-                show_help
-                exit 1
-                ;;
-        esac
-    done
-
-    # Validate arguments
-    if ! [[ "$parallel_jobs" =~ ^[0-9]+$ ]]; then
-        echo "Error: Number of jobs must be a positive integer" >&2
+        echo "API key not provided and key file $KEY_FILE missing." >&2
         exit 1
     fi
+fi
 
-    if ! [[ "$batch_wait" =~ ^[0-9]+$ ]]; then
-        echo "Error: Wait time must be a positive integer in seconds" >&2
-        exit 1
-    fi
+# sanity ---------------------------------------------------------------------
+check_deps
+[[ $BATCH_WAIT =~ ^[0-9]+$ ]] || { echo "--wait requires integer" >&2; exit 1; }
 
-    # Get API key if not provided as argument
-    if [ -z "$api_key" ]; then
-        if [ -f "$key_file" ]; then
-            api_key=$(cat "$key_file")
-        else
-            echo "Error: API key not provided and key file not found: $key_file" >&2
-            exit 1
-        fi
-    fi
+# single-file or multi-batch mode? ------------------------------------------
+if [[ $PREFIX == *.txt || $PREFIX == *.tsv || $PREFIX == *.csv ]]; then
+    BATCH_FILES=("$INPUT_DIR/$PREFIX")
+    [[ -f ${BATCH_FILES[0]} ]] || { echo "Batch file ${BATCH_FILES[0]} not found"; exit 1; }
+else
+    mapfile -t BATCH_FILES < <(find "$INPUT_DIR" -maxdepth 1 -type f -name "${PREFIX}*" | sort)
+    (( ${#BATCH_FILES[@]} )) || { echo "No files starting with '$PREFIX' inside $INPUT_DIR"; exit 1; }
+fi
 
-    # Check if API key is empty
-    if [ -z "$api_key" ]; then
-        echo "Error: Empty API key" >&2
-        exit 1
-    fi
-}
+echo "========== NCBI Genome Downloader (datasets version) =========="
+echo "Batches      : ${#BATCH_FILES[@]}"
+echo "Input dir    : $INPUT_DIR"
+echo "Output dir   : $OUTPUT_DIR"
+echo "API key      : ${API_KEY:0:3}...${API_KEY: -3}"
+echo "==============================================================="
 
-# Main function
-main() {
-    # Parse arguments
-    parse_arguments "$@"
+# ------------- core routine -------------------------------------------------
+process_batch () {
+    local batch_file=$1
+    local stem
+    stem=$(basename "$batch_file")
+    echo "→ Processing $stem ($(grep -v '^[[:space:]]*$\|^#' "$batch_file" | wc -l) accs)"
 
-    # Ensure directories exist
-    ensure_directory "$input_dir"
-    ensure_directory "$output_dir"
-
-    # Check for dependencies more thoroughly
-    check_dependencies
-
-    # Display summary of settings
-    echo "=== NCBI Genome Downloader ==="
-    echo "Input directory:     $input_dir"
-    echo "Output directory:    $output_dir"
-    echo "Batch file prefix:   $batch_prefix"
-    echo "Parallel jobs:       $parallel_jobs"
-    echo "Batch wait time:     $batch_wait seconds"
-    echo "API key:             ${api_key:0:3}...${api_key: -3}"
-    echo "==========================="
-
-    # Handle case for single batch file or batch files with prefix
-    single_file_mode=false
-    if [[ "$batch_prefix" == *".txt" || "$batch_prefix" == *".csv" || "$batch_prefix" == *".tsv" ]]; then
-        # This appears to be a single file rather than a prefix
-        single_file_mode=true
-        single_batch_file="$input_dir/$batch_prefix"
-
-        if [ ! -f "$single_batch_file" ]; then
-            echo "Error: Specified batch file not found: $single_batch_file" >&2
-            exit 1
-        fi
-
-        echo "Single batch file mode: Using $single_batch_file"
-    else
-        # This is a prefix for multiple batch files
-        # Note: We're using find instead of shell globbing for better error handling
-        file_count=$(find "$input_dir" -type f -name "${batch_prefix}*" | wc -l)
-        if [ "$file_count" -eq 0 ]; then
-            echo "Error: No batch files found in $input_dir with prefix '$batch_prefix'" >&2
-            echo "Please add batch files matching the pattern '${batch_prefix}*'" >&2
-            exit 1
-        fi
-
-        echo "Found $file_count batch files with prefix '$batch_prefix'"
-    fi
-
-    # Function to process a single batch file
-    process_batch_file() {
-        local batch_file="$1"
-        if [ -f "$batch_file" ]; then
-            echo "Processing batch file: $batch_file"
-
-            # Get the total count of lines for reporting
-            local total_lines=$(grep -v "^[[:space:]]*$\|^[[:space:]]*#" "$batch_file" | wc -l)
-            echo "Found $total_lines accessions in $batch_file"
-
-            # Validate total_lines to avoid division by zero
-            if [ "$total_lines" -eq 0 ]; then
-                echo "Warning: No valid accessions found in $batch_file, skipping" >&2
-                return 0
-            fi
-
-            # Create a temporary file to track progress
-            local progress_file=$(mktemp)
-            echo "0" > "$progress_file"  # Initialize with 0
-
-            # Export necessary variables for GNU parallel to use
-            export output_dir
-            export api_key
-            export progress_file
-            export total_lines
-
-            # Define the worker function for GNU parallel
-            worker_function() {
-                local acc="$1"
-                # Skip empty lines and commented out lines
-                if [[ -z "$acc" || "$acc" =~ ^[[:space:]]*# ]]; then
-                    return 0
-                fi
-
-                # Call the process_accession function
-                process_accession "$acc" "$output_dir" "$api_key"
-
-                # Update progress counter (in a thread-safe way)
-                flock -x "$progress_file.lock" bash -c "
-                    completed=\$(cat \"$progress_file\")
-                    completed=\$((completed + 1))
-                    echo \"\$completed\" > \"$progress_file\"
-                    progress=\$((completed * 100 / $total_lines))
-                    printf \"\\rProgress: %d/%d accessions completed (%d%%)\" \"\$completed\" \"$total_lines\" \"\$progress\"
-                "
-            }
-            export -f worker_function
-            export -f process_accession
-
-            # Create a lock file for the progress counter
-            touch "$progress_file.lock"
-
-            # Process accessions in parallel
-            grep -v "^[[:space:]]*$\|^[[:space:]]*#" "$batch_file" | \
-                parallel -j "$parallel_jobs" worker_function
-
-            # Clean up
-            rm -f "$progress_file" "$progress_file.lock"
-            echo -e "\nCompleted processing batch file: $batch_file"
-            return 0
-        else
-            echo "Warning: Skipping non-file: $batch_file" >&2
+    # 1. download                                            ────
+    local tmp_zip
+    tmp_zip=$(mktemp --suffix=".zip")
+    datasets download genome accession \
+        --inputfile   "$batch_file" \
+        --include     genome \
+        --api-key     "$API_KEY" \
+        --filename    "$tmp_zip"   \
+         || {
+            echo "Datasets failed for $stem" >&2
+            rm -f "$tmp_zip"
             return 1
-        fi
-    }
+        }
 
-    # Process each batch file or the single batch file
-    if [ "$single_file_mode" = true ]; then
-        process_batch_file "$single_batch_file"
+    # 2. extract *.fna                                        ────
+    unzip -o -q -j "$tmp_zip" -d "$OUTPUT_DIR"
+    local extracted=$?
+    rm -f "$tmp_zip"
+
+    # 3. prune vestigial artefacts -------------------------------------------
+    #    (they would appear only if you extend the extract pattern later)
+    find "$OUTPUT_DIR" -maxdepth 1 -type f \
+        \( -name 'README.md' \
+           -o -name 'assembly_data_report.jsonl' \
+           -o -name 'dataset_catalog.json' \
+           -o -name 'README.md' \
+           -o -name 'md5sum.txt' \) -delete
+
+    if [[ $extracted -ne 0 ]]; then
+        echo "Warning: unzip issues on $stem" >&2
     else
-        batch_count=0
-        total_batches=$(find "$input_dir" -type f -name "${batch_prefix}*" | wc -l)
-
-        # Process each batch file
-        while read -r batch_file; do
-            if [ -f "$batch_file" ]; then
-                batch_count=$((batch_count + 1))
-                echo "Processing batch file $batch_count/$total_batches: $batch_file"
-
-                process_batch_file "$batch_file"
-
-                # Check if this is the last batch file
-                if [ $batch_count -lt $total_batches ]; then
-                    echo "Batch $batch_count/$total_batches complete"
-                    echo "Waiting for $batch_wait seconds before processing the next batch..."
-                    sleep "$batch_wait"
-                fi
-            fi
-        done < <(find "$input_dir" -type f -name "${batch_prefix}*" | sort)
+        echo "✓ Done with $stem"
     fi
-
-    echo "All downloads complete. Genomes are available in: $output_dir"
 }
 
-# Run the main function with all script arguments
-main "$@"
+# ------------- main loop ----------------------------------------------------
+batch_idx=0
+for bf in "${BATCH_FILES[@]}"; do
+    (( ++batch_idx ))
+    process_batch "$bf"
+    # pause unless last batch or single-file mode
+    if (( batch_idx < ${#BATCH_FILES[@]} )); then
+        echo "Sleeping $BATCH_WAIT s to respect NCBI rate limits…"
+        sleep "$BATCH_WAIT"
+    fi
+done
+
+echo "All batches completed – genomes are in $OUTPUT_DIR"
