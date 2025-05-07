@@ -2,3 +2,6 @@ yacht
 matplotlib
 pandas
 scipy
+# Additional dependencies for refactored code
+argparse
+python-dotenv>=0.19.0
